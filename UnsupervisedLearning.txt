@@ -1,0 +1,193 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.svm import OneClassSVM
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import accuracy_score, precision_score, recall_score, confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+import time
+from sklearn.metrics import f1_score
+
+print('Wczytywanie danych')
+file_path_normal = r'*\hashed_traffic.csv'
+file_path_attack = r'*\hashed_attack.csv'
+
+normal_data = pd.read_csv(file_path_normal)
+attack_data = pd.read_csv(file_path_attack)
+
+X_train = normal_data
+X_test = pd.concat([normal_data, attack_data], ignore_index=True)
+y_test = np.concatenate([np.zeros(len(normal_data)), np.ones(len(attack_data))])  # 0 - normal, 1 - attack
+
+print('Standaryzacja cech')
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+test_records_count = len(X_test)
+print(f'Liczba rekordów w zbiorze testowym: {test_records_count}')
+
+# Czas dla Isolation Forest
+print('Isolation Forest')
+start_train = time.time()
+iso_forest = IsolationForest(n_estimators=500, random_state=42, contamination=0.02, bootstrap=True)
+iso_forest.fit(X_train_scaled)
+end_train = time.time()
+start_pred = time.time()
+iso_preds = iso_forest.predict(X_test_scaled)
+iso_preds = np.where(iso_preds == 1, 0, 1)
+iso_scores = -iso_forest.decision_function(X_test_scaled)
+end_pred = time.time()
+iso_acc = accuracy_score(y_test, iso_preds)
+print(f'Isolation Forest - czas uczenia: {end_train - start_train:.2f}s, czas przewidywania: {end_pred - start_pred:.2f}s, accuracy: {iso_acc:.4f}')
+
+# Czas dla Local Outlier Factor
+print('Local Outlier Factor')
+start_train = time.time()
+lof = LocalOutlierFactor(n_neighbors=20, contamination=0.02, novelty=True)
+lof.fit(X_train_scaled)
+end_train = time.time()
+start_pred = time.time()
+lof_preds = lof.predict(X_test_scaled)
+lof_preds = np.where(lof_preds == 1, 0, 1)
+lof_scores = -lof.decision_function(X_test_scaled)
+end_pred = time.time()
+lof_acc = accuracy_score(y_test, lof_preds)
+print(f'Local Outlier Factor - czas uczenia: {end_train - start_train:.2f}s, czas przewidywania: {end_pred - start_pred:.2f}s, accuracy: {lof_acc:.4f}')
+
+# Czas dla One-Class SVM
+print('One-Class SVM')
+start_train = time.time()
+oc_svm = OneClassSVM(gamma='auto', nu=0.1)
+oc_svm.fit(X_train_scaled)
+end_train = time.time()
+start_pred = time.time()
+svm_preds = oc_svm.predict(X_test_scaled)
+svm_preds = np.where(svm_preds == 1, 0, 1)
+svm_scores = -oc_svm.decision_function(X_test_scaled)
+end_pred = time.time()
+svm_acc = accuracy_score(y_test, svm_preds)
+print(f'One-Class SVM - czas uczenia: {end_train - start_train:.2f}s, czas przewidywania: {end_pred - start_pred:.2f}s, accuracy: {svm_acc:.4f}')
+
+print('KMeans')
+start_train = time.time()
+kmeans = KMeans(n_clusters=8, random_state=84, n_init=20)
+kmeans.fit(X_train_scaled)
+end_train = time.time()
+start_pred = time.time()
+kmeans_distances = kmeans.transform(X_test_scaled).min(axis=1)
+kmeans_preds = (kmeans_distances > np.percentile(kmeans_distances, 95)).astype(int)
+kmeans_scores = kmeans_distances
+end_pred = time.time()
+kmeans_acc = accuracy_score(y_test, kmeans_preds)
+print(f'KMeans - czas uczenia: {end_train - start_train:.2f}s, czas przewidywania: {end_pred - start_pred:.2f}s, accuracy: {kmeans_acc:.4f}')
+
+print('DBSCAN, może to potrwać trochę dłużej...')
+start_train = time.time()
+dbscan = DBSCAN(eps=1.5, min_samples=5)
+dbscan_labels = dbscan.fit_predict(X_test_scaled)
+end_train = time.time()
+start_pred = time.time()
+dbscan_preds = (dbscan_labels == -1).astype(int)
+from sklearn.neighbors import NearestNeighbors
+core_samples_mask = np.zeros_like(dbscan_labels, dtype=bool)
+core_samples_mask[dbscan.core_sample_indices_] = True
+nbrs = NearestNeighbors(n_neighbors=1).fit(X_test_scaled[core_samples_mask])
+dbscan_scores, _ = nbrs.kneighbors(X_test_scaled)
+dbscan_scores = dbscan_scores.flatten()
+end_pred = time.time()
+dbscan_acc = accuracy_score(y_test, dbscan_preds)
+print(f'DBSCAN - czas uczenia: {end_train - start_train:.2f}s, czas przewidywania: {end_pred - start_pred:.2f}s, accuracy: {dbscan_acc:.4f}')
+
+print('Analiza algorytmów')
+
+model_scores = [
+    ("Isolation Forest", iso_scores),
+    ("Local Outlier Factor", lof_scores),
+    ("One-Class SVM", svm_scores),
+    ("KMeans", kmeans_scores),
+    ("DBSCAN", dbscan_scores),
+]
+
+ix_normal = (y_test == 0)
+ix_attack = (y_test == 1)
+
+for model_name, scores in model_scores:
+    divergence = (scores - np.mean(scores)) / np.std(scores)
+    plt.figure(figsize=(8, 4))
+    plt.hist(
+        divergence[ix_normal],
+        bins=50,
+        label='Normal traffic',
+        histtype='step',
+        color='blue',
+        linewidth=2
+    )
+    plt.hist(
+        divergence[ix_attack],
+        bins=50,
+        label='Attack traffic',
+        histtype='step',        #
+        color='red',
+        linewidth=2
+    )
+    plt.xlabel('Deviation from mean')
+    plt.ylabel('Number of samples')
+    plt.title(f'Distribution of score deviations from mean ({model_name})')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f'divergence_score_hist_{model_name.lower().replace(" ", "_")}_split.png')
+    plt.show()
+
+plt.figure(figsize=(10, 5))
+for model_name, scores in model_scores:
+    divergence = (scores - np.mean(scores)) / np.std(scores)
+    plt.hist(
+        divergence[ix_normal],
+        bins=50,
+        label=f'{model_name} (Normal)',
+        histtype='step',
+        linewidth=2
+    )
+plt.xlabel('Deviation from mean')
+plt.ylabel('Number of samples')
+plt.title('Comparison of divergence (Normal traffic)')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('divergence_score_hist_all_models_normal.png')
+plt.show()
+
+plt.figure(figsize=(10, 5))
+for model_name, scores in model_scores:
+    divergence = (scores - np.mean(scores)) / np.std(scores)
+    plt.hist(
+        divergence[ix_attack],
+        bins=50,
+        label=f'{model_name} (Attack)',
+        histtype='step',
+        linewidth=2
+    )
+plt.xlabel('Deviation from mean')
+plt.ylabel('Number of samples')
+plt.title('Comparison of divergence (Attack traffic)')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('divergence_score_hist_all_models_attack.png')
+plt.show()
+
+iso_f1 = f1_score(y_test, iso_preds)
+lof_f1 = f1_score(y_test, lof_preds)
+svm_f1 = f1_score(y_test, svm_preds)
+kmeans_f1 = f1_score(y_test, kmeans_preds)
+dbscan_f1 = f1_score(y_test, dbscan_preds)
+
+print(f'Isolation Forest - F1-score: {iso_f1:.4f}')
+print(f'Local Outlier Factor - F1-score: {lof_f1:.4f}')
+print(f'One-Class SVM - F1-score: {svm_f1:.4f}')
+print(f'KMeans - F1-score: {kmeans_f1:.4f}')
+print(f'DBSCAN - F1-score: {dbscan_f1:.4f}')
